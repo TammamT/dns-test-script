@@ -7,7 +7,7 @@
 #   ./dns-audit.sh udp      # run only UDP tests
 #   ./dns-audit.sh doh dot  # run only DoH and DoT
 #
-# Available modules: detect udp tcp dot doh doq dnscrypt ipv6 bench
+# Available modules: detect udp tcp dot doh doq dnscrypt dnscrypt-verify ipv6 bench
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -27,7 +27,7 @@ source "$TESTS_DIR/common.sh"
 init_counters
 > "$REPORT_FILE"
 
-ALL_MODULES="detect udp tcp dot doh doq dnscrypt ipv6 bench"
+ALL_MODULES="detect udp tcp dot doh doq dnscrypt dnscrypt-verify ipv6 bench"
 MODULES="${@:-$ALL_MODULES}"
 
 header "DNS Audit v3 — Full Network Analysis"

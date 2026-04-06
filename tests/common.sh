@@ -306,8 +306,8 @@ test_dnscrypt() {
     end=$(date +%s%N); ms=$(( (end - start) / 1000000 ))
     if [ $rc -eq 0 ]; then
         inc pass
-        printf "  ${G}✓ OPEN${N}    %-33s %-15s:%-5s ${Y}%4d ms${N}  ${M}(DNSCrypt)${N}\n" "$name" "$ip" "$port" "$ms" | tee -a "$REPORT_FILE"
-        echo "OK|DNSCrypt|$ms|$name|$ip:$port" >> "$RANKING_FILE"
+        printf "  ${G}~ MAYBE${N}   %-33s %-15s:%-5s ${Y}%4d ms${N}  ${M}(DNSCrypt port open)${N}\n" "$name" "$ip" "$port" "$ms" | tee -a "$REPORT_FILE"
+        echo "MAYBE|DNSCrypt|$ms|$name|$ip:$port" >> "$RANKING_FILE"
     else
         inc fail
         printf "  ${R}✗ BLOCKED${N} %-33s %s:%s  ${M}(DNSCrypt)${N}\n" "$name" "$ip" "$port" | tee -a "$REPORT_FILE"
