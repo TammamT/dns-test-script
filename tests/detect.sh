@@ -1,6 +1,6 @@
 #!/bin/bash
 # detect.sh — hijack detection, port 53 interception, SNI/DPI inspection
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 section "HIJACK DETECTION"

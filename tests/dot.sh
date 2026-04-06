@@ -1,6 +1,6 @@
 #!/bin/bash
 # dot.sh — DNS-over-TLS :853
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 section "DNS-over-TLS (DoT :853)"

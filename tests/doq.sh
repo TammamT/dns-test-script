@@ -1,6 +1,6 @@
 #!/bin/bash
 # doq.sh — DNS-over-QUIC (port 853 or 8853, UDP-based)
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 section "DNS-over-QUIC (DoQ) — UDP port reachability"

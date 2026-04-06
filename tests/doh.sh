@@ -1,6 +1,6 @@
 #!/bin/bash
 # doh.sh — DNS-over-HTTPS with --resolve bypass (no DNS needed to test DoH)
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 section "DNS-over-HTTPS (DoH :443) — with IP bypass"

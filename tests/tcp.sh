@@ -1,6 +1,6 @@
 #!/bin/bash
 # tcp.sh — plain DNS over TCP :53
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 section "DNS (TCP :53)"
