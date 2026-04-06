@@ -81,6 +81,19 @@ else
     fi
 fi
 
+# Resolve trusted reference IP via DoT (needs kdig, so runs after dependency check)
+section "REFERENCE IP RESOLUTION"
+TRUSTED_IP=$(resolve_trusted_ip "$TEST_DOMAIN")
+if [ -n "$TRUSTED_IP" ]; then
+    export EXPECTED_IP="$TRUSTED_IP"
+    log "  ${G}✓${N} Resolved ${B}${TEST_DOMAIN}${N} via DoT: ${B}${EXPECTED_IP}${N}"
+    log "  ${C}  (tamper detection will compare against this)${N}"
+else
+    log "  ${Y}⚠${N} Could not resolve via DoT — tamper detection disabled"
+    log "  ${Y}  (all responses will be marked OK if they resolve)${N}"
+    export EXPECTED_IP=""
+fi
+
 # Run selected modules
 for mod in $MODULES; do
     if [ -f "$TESTS_DIR/${mod}.sh" ]; then

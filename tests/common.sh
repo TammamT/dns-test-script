@@ -3,10 +3,45 @@
 
 TIMEOUT="${TIMEOUT:-1}"
 TEST_DOMAIN="${TEST_DOMAIN:-example.com}"
-# Verify with: dig +short example.com A — update if it changes
-EXPECTED_IP="${EXPECTED_IP:-93.184.215.14}"
 REPORT_FILE="${REPORT_FILE:-dns_report_$(date +%Y%m%d_%H%M%S).txt}"
 RANKING_FILE="${RANKING_FILE:-/tmp/dns_ranking_$$.tmp}"
+
+# Resolve the "truth" IP via trusted encrypted DNS (DoT).
+# Tries multiple providers to avoid false positives from CDN/geo differences.
+# Falls back to hardcoded only if all DoT lookups fail.
+resolve_trusted_ip() {
+    local domain="$1"
+    local dot_servers="1.0.0.1:cloudflare-dns.com 8.8.8.8:dns.google 9.9.9.9:dns.quad9.net 94.140.14.14:dns.adguard-dns.com"
+    local answers=()
+
+    for entry in $dot_servers; do
+        local ip="${entry%%:*}"
+        local host="${entry##*:}"
+        local ans
+        if command -v kdig >/dev/null 2>&1; then
+            ans=$(kdig +tls-ca +tls-hostname="$host" +timeout=3 +retry=0 @"$ip" "$domain" A 2>/dev/null \
+                | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' | head -1)
+        fi
+        if [ -n "$ans" ]; then
+            answers+=("$ans")
+        fi
+    done
+
+    if [ ${#answers[@]} -eq 0 ]; then
+        # All DoT failed — fall back to hardcoded for known test domains
+        case "$domain" in
+            dns.google)  echo "8.8.8.8" ;;
+            *)           echo "" ;;
+        esac
+        return
+    fi
+
+    # Use majority answer — if most DoT servers agree, that's the truth
+    echo "${answers[@]}" | tr ' ' '\n' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}'
+}
+
+# EXPECTED_IP will be set at runtime by dns-audit.sh after init
+EXPECTED_IP="${EXPECTED_IP:-}"
 
 G='\033[0;32m'; R='\033[0;31m'; Y='\033[1;33m'
 C='\033[0;36m'; B='\033[1m';    M='\033[0;35m'; W='\033[1;37m'; N='\033[0m'
@@ -38,7 +73,7 @@ test_udp() {
     answer=$(echo "$output" | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' | head -1)
     if echo "$output" | grep -q "NOERROR" && [ -n "$ms" ]; then
         inc pass
-        if [ -n "$answer" ] && [ "$answer" != "$EXPECTED_IP" ]; then
+        if [ -n "$EXPECTED_IP" ] && [ -n "$answer" ] && [ "$answer" != "$EXPECTED_IP" ]; then
             inc tampered
             printf "  ${Y}⚠ TAMPER${N}  %-33s %-20s ${Y}%4d ms${N}  ${R}→ %s${N}\n" "$name" "$ip" "$ms" "$answer" | tee -a "$REPORT_FILE"
             echo "TAMPER|UDP|$ms|$name|$ip|$answer" >> "$RANKING_FILE"
@@ -60,7 +95,7 @@ test_tcp() {
     answer=$(echo "$output" | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' | head -1)
     if echo "$output" | grep -q "NOERROR" && [ -n "$ms" ]; then
         inc pass
-        if [ -n "$answer" ] && [ "$answer" != "$EXPECTED_IP" ]; then
+        if [ -n "$EXPECTED_IP" ] && [ -n "$answer" ] && [ "$answer" != "$EXPECTED_IP" ]; then
             inc tampered
             printf "  ${Y}⚠ TAMPER${N}  %-33s %-20s ${Y}%4d ms${N}  ${C}(TCP)${N}  ${R}→ %s${N}\n" "$name" "$ip" "$ms" "$answer" | tee -a "$REPORT_FILE"
             echo "TAMPER|TCP|$ms|$name|$ip|$answer" >> "$RANKING_FILE"
@@ -82,9 +117,18 @@ test_dot() {
         result=$(kdig +tls-ca +tls-hostname="$hostname" +timeout=$TIMEOUT +retry=0 @"$ip" "$TEST_DOMAIN" A 2>/dev/null)
         end=$(date +%s%N); ms=$(( (end - start) / 1000000 ))
         if echo "$result" | grep -q "NOERROR"; then
+            local dot_answer
+            dot_answer=$(echo "$result" | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' | head -1)
             inc pass
-            printf "  ${G}✓ OPEN${N}    %-33s %-20s ${Y}%4d ms${N}  ${M}(DoT)${N}\n" "$name" "$ip" "$ms" | tee -a "$REPORT_FILE"
-            echo "OK|DoT|$ms|$name|$ip" >> "$RANKING_FILE"; return
+            if [ -n "$EXPECTED_IP" ] && [ -n "$dot_answer" ] && [ "$dot_answer" != "$EXPECTED_IP" ]; then
+                inc tampered
+                printf "  ${Y}⚠ TAMPER${N}  %-33s %-20s ${Y}%4d ms${N}  ${M}(DoT)${N}  ${R}→ %s${N}\n" "$name" "$ip" "$ms" "$dot_answer" | tee -a "$REPORT_FILE"
+                echo "TAMPER|DoT|$ms|$name|$ip|$dot_answer" >> "$RANKING_FILE"
+            else
+                printf "  ${G}✓ OPEN${N}    %-33s %-20s ${Y}%4d ms${N}  ${M}(DoT)${N}\n" "$name" "$ip" "$ms" | tee -a "$REPORT_FILE"
+                echo "OK|DoT|$ms|$name|$ip" >> "$RANKING_FILE"
+            fi
+            return
         fi
     fi
     start=$(date +%s%N)
@@ -111,7 +155,7 @@ test_doh() {
     end=$(date +%s%N); ms=$(( (end - start) / 1000000 ))
     if [ -n "$answer" ]; then
         inc pass
-        if [ "$answer" != "$EXPECTED_IP" ]; then
+        if [ -n "$EXPECTED_IP" ] && [ "$answer" != "$EXPECTED_IP" ]; then
             inc tampered
             printf "  ${Y}⚠ TAMPER${N}  %-18s %-24s → %-15s ${Y}%4d ms${N}  ${R}→ %s${N}\n" "$name" "$hostname" "$ip" "$ms" "$answer" | tee -a "$REPORT_FILE"
             echo "TAMPER|DoH|$ms|$name|$hostname>$ip|$answer" >> "$RANKING_FILE"
