@@ -29,7 +29,6 @@ Dependencies are **auto-installed** on first run via `apt`:
 ```bash
 git clone https://github.com/TammamT/dns-test-script.git
 cd dns-test-script
-chmod +x dns-audit.sh tests/*.sh
 ./dns-audit.sh
 ```
 
