@@ -37,8 +37,10 @@ log "  Sending DNS query to a non-DNS server on port 53..."
 log "  If we get a response, ISP is proxying ALL :53 traffic"
 log ""
 
+PORT53_INTERCEPTED=0
 intercept=$(dig +short +timeout=2 +tries=1 @93.184.215.14 google.com A 2>/dev/null | head -1)
 if [ -n "$intercept" ] && ! echo "$intercept" | grep -q "timed out"; then
+    PORT53_INTERCEPTED=1
     log "  ${R}${B}⚠ PORT 53 INTERCEPTION CONFIRMED${N}"
     log "  ${R}  Got DNS response from 93.184.215.14 (not a DNS server): $intercept${N}"
     log "  ${Y}  ISP redirects ALL port 53 traffic — plain DNS cannot be trusted${N}"

@@ -130,19 +130,31 @@ log "  Total tested:    ${B}$(get total)${N}"
 log "  ${G}Accessible:      $(get pass)${N}"
 log "  ${R}Blocked:         $(get fail)${N}"
 log "  ${Y}Tampered:        $(get tampered)${N}"
+log "  ${M}Intercepted:     $(get intercepted)${N}"
 log ""
 
 p=$(get pass)
-if [ "$p" -eq 0 ]; then
+i=$(get intercepted)
+t=$(get tampered)
+
+if [ "$p" -eq 0 ] && [ "$i" -eq 0 ]; then
     log "  ${R}${B}Everything blocked!${N}"
     log "  ${Y}Options: VPN, Cloudflare WARP, DNS tunneling (iodine/dnstt)${N}"
+elif [ "$p" -eq 0 ] && [ "$i" -gt 0 ]; then
+    log "  ${Y}${B}All plain DNS intercepted by ISP — only encrypted DNS is safe${N}"
 elif [ "$p" -lt 5 ]; then
     log "  ${Y}${B}Heavy blocking detected.${N}"
 else
     log "  ${G}${B}Multiple servers accessible.${N}"
 fi
 
-t=$(get tampered)
+if [ "$i" -gt 0 ]; then
+    log ""
+    log "  ${M}${B}⚠ $i server(s) responded via ISP transparent proxy${N}"
+    log "  ${M}  Answers may be correct now but ISP controls the proxy${N}"
+    log "  ${M}  Use encrypted DNS (DoT/DoH/DoQ) to bypass${N}"
+fi
+
 if [ "$t" -gt 0 ]; then
     log ""
     log "  ${Y}${B}⚠ $t server(s) returned tampered/different IPs${N}"

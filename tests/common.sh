@@ -55,9 +55,11 @@ G='\033[0;32m'; R='\033[0;31m'; Y='\033[1;33m'
 C='\033[0;36m'; B='\033[1m';    M='\033[0;35m'; W='\033[1;37m'; N='\033[0m'
 
 COUNTER_DIR="${COUNTER_DIR:-/tmp/dns_audit_$$}"
+PORT53_INTERCEPTED="${PORT53_INTERCEPTED:-0}"
+
 init_counters() {
     mkdir -p "$COUNTER_DIR"
-    for f in pass fail total tampered; do echo 0 > "$COUNTER_DIR/$f"; done
+    for f in pass fail total tampered intercepted; do echo 0 > "$COUNTER_DIR/$f"; done
     > "$RANKING_FILE"
 }
 inc() { local v=$(cat "$COUNTER_DIR/$1"); echo $((v+1)) > "$COUNTER_DIR/$1"; }
@@ -132,6 +134,14 @@ _check_tamper() {
 #
 _report_result() {
     local name="$1" addr="$2" proto="$3" label="$4"
+
+    # If port 53 is intercepted, UDP/TCP "clean" results are not trustworthy
+    if [ "$PORT53_INTERCEPTED" -eq 1 ] && [[ "$proto" =~ ^(UDP|TCP)$ ]] && [ "$_TAMPER_RESULT" != "blocked" ]; then
+        inc intercepted
+        printf "  ${M}⚠ INTERCPT${N} %-33s %-20s ${Y}%4d ms${N}  %b\n" "$name" "$addr" "$_TAMPER_MS" "$label" | tee -a "$REPORT_FILE"
+        return
+    fi
+
     case "$_TAMPER_RESULT" in
         clean)
             inc pass
