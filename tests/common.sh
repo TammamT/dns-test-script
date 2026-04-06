@@ -104,11 +104,11 @@ test_doh() {
     local name="$1" hostname="$2" ip="$3" path="$4"; inc total
     local start end ms result answer
     start=$(date +%s%N)
-    result=$(curl -s --max-time 2 --resolve "${hostname}:443:${ip}" \
+    answer=$(curl -s --max-time 2 --resolve "${hostname}:443:${ip}" \
         -H "accept: application/dns-json" \
-        "https://${hostname}${path}?name=${TEST_DOMAIN}&type=A" 2>/dev/null)
+        "https://${hostname}${path}?name=${TEST_DOMAIN}&type=A" 2>/dev/null | \
+        tr -d '\0' | grep -oP '"data"\s*:\s*"\K[0-9.]+' | head -1)
     end=$(date +%s%N); ms=$(( (end - start) / 1000000 ))
-    answer=$(echo "$result" | grep -oP '"data"\s*:\s*"\K[0-9.]+' | head -1)
     if [ -n "$answer" ]; then
         inc pass
         if [ "$answer" != "$EXPECTED_IP" ]; then
