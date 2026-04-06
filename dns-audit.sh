@@ -200,7 +200,23 @@ _agh_line() {
         DoT)     echo "tls://$addr" ;;
         DoH)     echo "https://${addr}" ;;
         DoQ)     echo "quic://$addr" ;;
+        DNSCrypt) ;; # needs dnscrypt-proxy, skip from AGH config
     esac
+}
+
+_dnscrypt_entries() {
+    local source="$1"
+    if [ "$source" = "bench" ]; then
+        grep "|DNSCrypt|" "$BENCH_FILE" 2>/dev/null | sort -t'|' -k1 -n | head -5 | \
+        while IFS='|' read -r median avg min max count proto name addr; do
+            printf "  #   %s  (%d ms)\n" "$addr" "$median"
+        done
+    else
+        grep "^OK|DNSCrypt|" "$RANKING_FILE" 2>/dev/null | sort -t'|' -k3 -n | head -5 | \
+        while IFS='|' read -r status proto ms name addr extra; do
+            printf "  #   %s  (%d ms)\n" "$addr" "$ms"
+        done
+    fi
 }
 
 if [ -f "$BENCH_FILE" ] && [ -s "$BENCH_FILE" ]; then
@@ -208,21 +224,36 @@ if [ -f "$BENCH_FILE" ] && [ -s "$BENCH_FILE" ]; then
     log ""
     log "  Based on benchmark results (median latency):"
     log ""
-    sort -t'|' -k1 -n "$BENCH_FILE" | head -10 | \
+    # Skip DNSCrypt — increase head to compensate for skipped entries
+    sort -t'|' -k1 -n "$BENCH_FILE" | head -20 | \
     while IFS='|' read -r median avg min max count proto name addr; do
         line=$(_agh_line "$proto" "$addr")
         [ -n "$line" ] && log "  $line"
     done
+
+    dnscrypt_lines=$(_dnscrypt_entries bench)
+    if [ -n "$dnscrypt_lines" ]; then
+        log ""
+        log "  ${C}DNSCrypt (install dnscrypt-proxy, point AGH to 127.0.0.1:5353):${N}"
+        echo "$dnscrypt_lines" | while read -r line; do log "$line"; done
+    fi
 elif [ -f "$RANKING_FILE" ] && [ -s "$RANKING_FILE" ]; then
     header "SUGGESTED AGH UPSTREAM CONFIG"
     log ""
     log "  Based on fastest working servers:"
     log ""
-    grep "^OK|" "$RANKING_FILE" | sort -t'|' -k3 -n | head -10 | \
+    grep "^OK|" "$RANKING_FILE" | sort -t'|' -k3 -n | head -20 | \
     while IFS='|' read -r status proto ms name addr extra; do
         line=$(_agh_line "$proto" "$addr")
         [ -n "$line" ] && log "  $line"
     done
+
+    dnscrypt_lines=$(_dnscrypt_entries ranking)
+    if [ -n "$dnscrypt_lines" ]; then
+        log ""
+        log "  ${C}DNSCrypt (install dnscrypt-proxy, point AGH to 127.0.0.1:5353):${N}"
+        echo "$dnscrypt_lines" | while read -r line; do log "$line"; done
+    fi
 fi
 
 log ""
