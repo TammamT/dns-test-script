@@ -195,7 +195,8 @@ fi
 _agh_line() {
     local proto="$1" addr="$2"
     case "$proto" in
-        UDP|TCP) echo "$addr" ;;
+        UDP) echo "$addr" ;;
+        TCP) echo "tcp://$addr" ;;
         DoT)     echo "tls://$addr" ;;
         DoH)     echo "https://${addr}" ;;
         DoQ)     echo "quic://$addr" ;;

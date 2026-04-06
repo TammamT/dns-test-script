@@ -291,7 +291,7 @@ test_doq() {
     if [ $rc -eq 0 ]; then
         inc pass
         printf "  ${G}~ MAYBE${N}   %-33s %-15s:%-5s ${Y}%4d ms${N}  ${C}(QUIC port open)${N}\n" "$name" "$ip" "$port" "$ms" | tee -a "$REPORT_FILE"
-        echo "OK|DoQ|$ms|$name|$ip:$port" >> "$RANKING_FILE"
+        echo "MAYBE|DoQ|$ms|$name|$ip:$port" >> "$RANKING_FILE"
     else
         inc fail
         printf "  ${R}✗ BLOCKED${N} %-33s %s:%s  ${C}(QUIC)${N}\n" "$name" "$ip" "$port" | tee -a "$REPORT_FILE"
