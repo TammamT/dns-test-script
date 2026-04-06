@@ -7,7 +7,7 @@
 #   ./dns-audit.sh udp      # run only UDP tests
 #   ./dns-audit.sh doh dot  # run only DoH and DoT
 #
-# Available modules: detect udp tcp dot doh doq dnscrypt ipv6
+# Available modules: detect udp tcp dot doh doq dnscrypt ipv6 bench
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -19,13 +19,15 @@ export TEST_DOMAIN="${TEST_DOMAIN:-example.com}"
 export REPORT_FILE="${REPORT_FILE:-$SCRIPT_DIR/dns_report_$(date +%Y%m%d_%H%M%S).txt}"
 export RANKING_FILE="/tmp/dns_ranking_$$.tmp"
 export COUNTER_DIR="/tmp/dns_audit_$$"
+export TAMPER_DIR="/tmp/dns_tamper_$$"
+export BENCH_FILE="/tmp/dns_bench_$$.tmp"
 
 # Init
 source "$TESTS_DIR/common.sh"
 init_counters
 > "$REPORT_FILE"
 
-ALL_MODULES="detect udp tcp dot doh doq dnscrypt ipv6"
+ALL_MODULES="detect udp tcp dot doh doq dnscrypt ipv6 bench"
 MODULES="${@:-$ALL_MODULES}"
 
 header "DNS Audit v3 — Full Network Analysis"
@@ -81,17 +83,31 @@ else
     fi
 fi
 
-# Resolve trusted reference IP via DoT (needs kdig, so runs after dependency check)
+# Resolve trusted reference IPs via DoT (needs kdig, so runs after dependency check)
 section "REFERENCE IP RESOLUTION"
-TRUSTED_IP=$(resolve_trusted_ip "$TEST_DOMAIN")
-if [ -n "$TRUSTED_IP" ]; then
-    export EXPECTED_IP="$TRUSTED_IP"
-    log "  ${G}✓${N} Resolved ${B}${TEST_DOMAIN}${N} via DoT: ${B}${EXPECTED_IP}${N}"
-    log "  ${C}  (tamper detection will compare against this)${N}"
+log "  Resolving ${B}$(echo $TAMPER_DOMAINS | wc -w)${N} test domains via DoT (4 providers each)..."
+log ""
+resolve_all_trusted_ips
+
+resolved=0
+for td in $TAMPER_DOMAINS; do
+    tf=$(_trust_file_for "$td")
+    if [ -s "$tf" ]; then
+        ip_count=$(wc -l < "$tf")
+        ips=$(paste -sd', ' "$tf")
+        printf "  ${G}✓${N} %-25s ${B}%d${N} IP(s): %s\n" "$td" "$ip_count" "$ips" | tee -a "$REPORT_FILE"
+        resolved=$((resolved + 1))
+    else
+        printf "  ${R}✗${N} %-25s no response from any DoT provider\n" "$td" | tee -a "$REPORT_FILE"
+    fi
+done
+
+log ""
+if [ "$resolved" -gt 0 ]; then
+    log "  ${G}✓${N} Tamper detection active — ${B}${resolved}${N}/${B}$(echo $TAMPER_DOMAINS | wc -w)${N} domains resolved"
+    log "  ${C}  (responses outside trusted sets will be flagged)${N}"
 else
-    log "  ${Y}⚠${N} Could not resolve via DoT — tamper detection disabled"
-    log "  ${Y}  (all responses will be marked OK if they resolve)${N}"
-    export EXPECTED_IP=""
+    log "  ${Y}⚠${N} Could not resolve any domain via DoT — tamper detection disabled"
 fi
 
 # Run selected modules
@@ -164,21 +180,35 @@ fi
 # ====================================================================
 # AGH CONFIG SUGGESTION
 # ====================================================================
-if [ -f "$RANKING_FILE" ] && [ -s "$RANKING_FILE" ]; then
+_agh_line() {
+    local proto="$1" addr="$2"
+    case "$proto" in
+        UDP|TCP) echo "$addr" ;;
+        DoT)     echo "tls://$addr" ;;
+        DoH)     echo "https://${addr}" ;;
+        DoQ)     echo "quic://$addr" ;;
+    esac
+}
+
+if [ -f "$BENCH_FILE" ] && [ -s "$BENCH_FILE" ]; then
+    header "SUGGESTED AGH UPSTREAM CONFIG"
+    log ""
+    log "  Based on benchmark results (median latency):"
+    log ""
+    sort -t'|' -k1 -n "$BENCH_FILE" | head -10 | \
+    while IFS='|' read -r median avg min max count proto name addr; do
+        line=$(_agh_line "$proto" "$addr")
+        [ -n "$line" ] && log "  $line"
+    done
+elif [ -f "$RANKING_FILE" ] && [ -s "$RANKING_FILE" ]; then
     header "SUGGESTED AGH UPSTREAM CONFIG"
     log ""
     log "  Based on fastest working servers:"
     log ""
-
-    # Get top 5 unique IPs from OK results
     grep "^OK|" "$RANKING_FILE" | sort -t'|' -k3 -n | head -10 | \
     while IFS='|' read -r status proto ms name addr extra; do
-        case "$proto" in
-            UDP|TCP) log "  $addr" ;;
-            DoT)     log "  tls://$addr" ;;
-            DoH)     log "  https://${addr}" ;;
-            DoQ)     log "  quic://$addr" ;;
-        esac
+        line=$(_agh_line "$proto" "$addr")
+        [ -n "$line" ] && log "  $line"
     done
 fi
 
@@ -188,4 +218,6 @@ log ""
 
 # Cleanup
 rm -f "$RANKING_FILE"
+rm -f "$BENCH_FILE"
+rm -rf "$TAMPER_DIR"
 rm -rf "$COUNTER_DIR"

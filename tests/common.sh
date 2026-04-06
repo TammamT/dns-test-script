@@ -6,42 +6,50 @@ TEST_DOMAIN="${TEST_DOMAIN:-example.com}"
 REPORT_FILE="${REPORT_FILE:-dns_report_$(date +%Y%m%d_%H%M%S).txt}"
 RANKING_FILE="${RANKING_FILE:-/tmp/dns_ranking_$$.tmp}"
 
-# Resolve the "truth" IP via trusted encrypted DNS (DoT).
-# Tries multiple providers to avoid false positives from CDN/geo differences.
-# Falls back to hardcoded only if all DoT lookups fail.
-resolve_trusted_ip() {
-    local domain="$1"
-    local dot_servers="1.0.0.1:cloudflare-dns.com 8.8.8.8:dns.google 9.9.9.9:dns.quad9.net 94.140.14.14:dns.adguard-dns.com"
-    local answers=()
+# --- Tamper detection via multi-domain DoT reference resolution ---
+#
+# Domains chosen for tamper detection:
+#   - Mix of CDN, well-known, porn (ISP-blocked), and obscure infrastructure
+#   - Porn sites are the best canary: filtering ISPs *will* tamper with them
+#   - Obscure infra sites catch blanket hijacking without ISP whitelisting
+#
+TAMPER_DOMAINS="example.com dns.google eporner.com txxx.com hdzog.com ftp.afrinic.net lacnic.net ftp.isc.org"
+TAMPER_DIR="${TAMPER_DIR:-/tmp/dns_tamper_$$}"
+DOT_SERVERS="1.0.0.1:cloudflare-dns.com 8.8.8.8:dns.google 9.9.9.9:dns.quad9.net 94.140.14.14:dns.adguard-dns.com"
 
-    for entry in $dot_servers; do
-        local ip="${entry%%:*}"
-        local host="${entry##*:}"
-        local ans
-        if command -v kdig >/dev/null 2>&1; then
-            ans=$(kdig +tls-ca +tls-hostname="$host" +timeout=3 +retry=0 @"$ip" "$domain" A 2>/dev/null \
-                | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' | head -1)
-        fi
-        if [ -n "$ans" ]; then
-            answers+=("$ans")
-        fi
+# --- Trusted IP resolution and lookup ---
+
+resolve_all_trusted_ips() {
+    mkdir -p "$TAMPER_DIR"
+    local domain entry ip host
+
+    for domain in $TAMPER_DOMAINS; do
+        local trust_file="$TAMPER_DIR/${domain//./_}.ips"
+        > "$trust_file"
+
+        for entry in $DOT_SERVERS; do
+            ip="${entry%%:*}"
+            host="${entry##*:}"
+            if command -v kdig >/dev/null 2>&1; then
+                kdig +tls-ca +tls-hostname="$host" +timeout=3 +retry=0 @"$ip" "$domain" A 2>/dev/null \
+                    | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' >> "$trust_file"
+            fi
+        done
+
+        [ -s "$trust_file" ] && sort -u "$trust_file" -o "$trust_file"
     done
-
-    if [ ${#answers[@]} -eq 0 ]; then
-        # All DoT failed — fall back to hardcoded for known test domains
-        case "$domain" in
-            dns.google)  echo "8.8.8.8" ;;
-            *)           echo "" ;;
-        esac
-        return
-    fi
-
-    # Use majority answer — if most DoT servers agree, that's the truth
-    echo "${answers[@]}" | tr ' ' '\n' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}'
 }
 
-# EXPECTED_IP will be set at runtime by dns-audit.sh after init
-EXPECTED_IP="${EXPECTED_IP:-}"
+_trust_file_for() { echo "$TAMPER_DIR/${1//./_}.ips"; }
+
+is_trusted_ip_for() {
+    local tf="$TAMPER_DIR/${1//./_}.ips"
+    [ -s "$tf" ] && grep -qxF "$2" "$tf"
+}
+
+tamper_enabled_for() { [ -s "$TAMPER_DIR/${1//./_}.ips" ]; }
+
+# --- Colors and counters ---
 
 G='\033[0;32m'; R='\033[0;31m'; Y='\033[1;33m'
 C='\033[0;36m'; B='\033[1m';    M='\033[0;35m'; W='\033[1;37m'; N='\033[0m'
@@ -55,6 +63,8 @@ init_counters() {
 inc() { local v=$(cat "$COUNTER_DIR/$1"); echo $((v+1)) > "$COUNTER_DIR/$1"; }
 get() { cat "$COUNTER_DIR/$1"; }
 
+# --- Logging ---
+
 log()     { echo -e "$1" | tee -a "$REPORT_FILE"; }
 log_raw() { echo "$1" >> "$REPORT_FILE"; }
 section() { log ""; log "${C}── $1 ──${N}"; log ""; }
@@ -65,72 +75,172 @@ header()  {
     log "${B}═══════════════════════════════════════════════════════════════════${N}"
 }
 
+# --- Core tamper check ---
+#
+# _check_tamper <query_func> [extra_args...]
+#
+# Loops over TAMPER_DOMAINS, calls query_func for each, compares answers.
+# query_func signature: query_func <domain> [extra_args...]
+#   Must set: _Q_ANSWER (IP or empty), _Q_MS (latency)
+#   Return 0 = got answer, non-zero = failed
+#
+# Sets on return:
+#   _TAMPER_RESULT  = clean | tampered | blocked
+#   _TAMPER_MS      = latency of first successful query
+#   _TAMPER_COUNT   = "N/M" (tampered/checked)
+#   _TAMPER_DETAILS = "domain→fake_ip domain→fake_ip ..."
+#
+_check_tamper() {
+    local query_func="$1"; shift
+    local tampered_count=0 checked_count=0
+    _TAMPER_MS="" ; _TAMPER_DETAILS=""
+
+    for domain in $TAMPER_DOMAINS; do
+        tamper_enabled_for "$domain" || continue
+
+        _Q_ANSWER="" ; _Q_MS=""
+        if "$query_func" "$domain" "$@"; then
+            [ -z "$_TAMPER_MS" ] && _TAMPER_MS="$_Q_MS"
+            checked_count=$((checked_count + 1))
+
+            if [ -n "$_Q_ANSWER" ] && ! is_trusted_ip_for "$domain" "$_Q_ANSWER"; then
+                tampered_count=$((tampered_count + 1))
+                _TAMPER_DETAILS="${_TAMPER_DETAILS}${domain}→${_Q_ANSWER} "
+            fi
+        else
+            # Query failed — if first domain fails, server is likely blocked; bail early
+            [ "$checked_count" -eq 0 ] && break
+        fi
+    done
+
+    if [ "$checked_count" -eq 0 ]; then
+        _TAMPER_RESULT="blocked"; _TAMPER_MS=0; return 2
+    fi
+
+    _TAMPER_COUNT="$tampered_count/$checked_count"
+    if [ "$tampered_count" -gt 0 ]; then
+        _TAMPER_RESULT="tampered"; return 1
+    else
+        _TAMPER_RESULT="clean"; return 0
+    fi
+}
+
+# --- Result reporting ---
+#
+# _report_result <name> <addr> <proto> <label>
+#   Reads _TAMPER_RESULT, _TAMPER_MS, _TAMPER_COUNT, _TAMPER_DETAILS
+#
+_report_result() {
+    local name="$1" addr="$2" proto="$3" label="$4"
+    case "$_TAMPER_RESULT" in
+        clean)
+            inc pass
+            printf "  ${G}✓ OPEN${N}    %-33s %-20s ${Y}%4d ms${N}  %b\n" "$name" "$addr" "$_TAMPER_MS" "$label" | tee -a "$REPORT_FILE"
+            echo "OK|$proto|$_TAMPER_MS|$name|$addr" >> "$RANKING_FILE"
+            ;;
+        tampered)
+            inc pass; inc tampered
+            printf "  ${Y}⚠ TAMPER${N}  %-33s %-20s ${Y}%4d ms${N}  %b  ${R}(%s) %s${N}\n" "$name" "$addr" "$_TAMPER_MS" "$label" "$_TAMPER_COUNT" "$_TAMPER_DETAILS" | tee -a "$REPORT_FILE"
+            echo "TAMPER|$proto|$_TAMPER_MS|$name|$addr|$_TAMPER_DETAILS" >> "$RANKING_FILE"
+            ;;
+        blocked)
+            inc fail
+            printf "  ${R}✗ BLOCKED${N} %-33s %s  %b\n" "$name" "$addr" "$label" | tee -a "$REPORT_FILE"
+            ;;
+    esac
+}
+
+# --- DoH result reporting (different column layout) ---
+
+_report_result_doh() {
+    local name="$1" hostname="$2" ip="$3"
+    case "$_TAMPER_RESULT" in
+        clean)
+            inc pass
+            printf "  ${G}✓ OPEN${N}    %-18s %-24s → %-15s ${Y}%4d ms${N}\n" "$name" "$hostname" "$ip" "$_TAMPER_MS" | tee -a "$REPORT_FILE"
+            echo "OK|DoH|$_TAMPER_MS|$name|$hostname>$ip" >> "$RANKING_FILE"
+            ;;
+        tampered)
+            inc pass; inc tampered
+            printf "  ${Y}⚠ TAMPER${N}  %-18s %-24s → %-15s ${Y}%4d ms${N}  ${R}(%s) %s${N}\n" "$name" "$hostname" "$ip" "$_TAMPER_MS" "$_TAMPER_COUNT" "$_TAMPER_DETAILS" | tee -a "$REPORT_FILE"
+            echo "TAMPER|DoH|$_TAMPER_MS|$name|$hostname>$ip|$_TAMPER_DETAILS" >> "$RANKING_FILE"
+            ;;
+        blocked)
+            inc fail
+            printf "  ${R}✗ BLOCKED${N} %-18s %-24s → %s\n" "$name" "$hostname" "$ip" | tee -a "$REPORT_FILE"
+            ;;
+    esac
+}
+
+# --- Query functions (called by _check_tamper) ---
+
+_query_udp() {
+    local domain="$1" ip="$2"
+    local output
+    output=$(dig +timeout=$TIMEOUT +tries=1 +stats @"$ip" "$domain" A 2>/dev/null)
+    _Q_MS=$(echo "$output" | grep -oP 'Query time: \K[0-9]+')
+    _Q_ANSWER=$(echo "$output" | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' | head -1)
+    echo "$output" | grep -q "NOERROR" && [ -n "$_Q_MS" ]
+}
+
+_query_tcp() {
+    local domain="$1" ip="$2"
+    local output
+    output=$(dig +timeout=$TIMEOUT +tries=1 +tcp +stats @"$ip" "$domain" A 2>/dev/null)
+    _Q_MS=$(echo "$output" | grep -oP 'Query time: \K[0-9]+')
+    _Q_ANSWER=$(echo "$output" | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' | head -1)
+    echo "$output" | grep -q "NOERROR" && [ -n "$_Q_MS" ]
+}
+
+_query_dot() {
+    local domain="$1" ip="$2" hostname="$3"
+    local start end result
+    start=$(date +%s%N)
+    result=$(kdig +tls-ca +tls-hostname="$hostname" +timeout=$TIMEOUT +retry=0 @"$ip" "$domain" A 2>/dev/null)
+    end=$(date +%s%N)
+    _Q_MS=$(( (end - start) / 1000000 ))
+    _Q_ANSWER=$(echo "$result" | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' | head -1)
+    echo "$result" | grep -q "NOERROR"
+}
+
+_query_doh() {
+    local domain="$1" hostname="$2" ip="$3" path="$4"
+    local start end
+    start=$(date +%s%N)
+    _Q_ANSWER=$(curl -s --max-time 2 --resolve "${hostname}:443:${ip}" \
+        -H "accept: application/dns-json" \
+        "https://${hostname}${path}?name=${domain}&type=A" 2>/dev/null | \
+        tr -d '\0' | grep -oP '"data"\s*:\s*"\K[0-9.]+' | head -1)
+    end=$(date +%s%N)
+    _Q_MS=$(( (end - start) / 1000000 ))
+    [ -n "$_Q_ANSWER" ]
+}
+
+# --- Public test functions ---
+
 test_udp() {
     local name="$1" ip="$2"; inc total
-    local output ms answer
-    output=$(dig +timeout=$TIMEOUT +tries=1 +stats @"$ip" "$TEST_DOMAIN" A 2>/dev/null)
-    ms=$(echo "$output" | grep -oP 'Query time: \K[0-9]+')
-    answer=$(echo "$output" | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' | head -1)
-    if echo "$output" | grep -q "NOERROR" && [ -n "$ms" ]; then
-        inc pass
-        if [ -n "$EXPECTED_IP" ] && [ -n "$answer" ] && [ "$answer" != "$EXPECTED_IP" ]; then
-            inc tampered
-            printf "  ${Y}⚠ TAMPER${N}  %-33s %-20s ${Y}%4d ms${N}  ${R}→ %s${N}\n" "$name" "$ip" "$ms" "$answer" | tee -a "$REPORT_FILE"
-            echo "TAMPER|UDP|$ms|$name|$ip|$answer" >> "$RANKING_FILE"
-        else
-            printf "  ${G}✓ OPEN${N}    %-33s %-20s ${Y}%4d ms${N}\n" "$name" "$ip" "$ms" | tee -a "$REPORT_FILE"
-            echo "OK|UDP|$ms|$name|$ip" >> "$RANKING_FILE"
-        fi
-    else
-        inc fail
-        printf "  ${R}✗ BLOCKED${N} %-33s %s\n" "$name" "$ip" | tee -a "$REPORT_FILE"
-    fi
+    _check_tamper _query_udp "$ip"
+    _report_result "$name" "$ip" "UDP" ""
 }
 
 test_tcp() {
     local name="$1" ip="$2"; inc total
-    local output ms answer
-    output=$(dig +timeout=$TIMEOUT +tries=1 +tcp +stats @"$ip" "$TEST_DOMAIN" A 2>/dev/null)
-    ms=$(echo "$output" | grep -oP 'Query time: \K[0-9]+')
-    answer=$(echo "$output" | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' | head -1)
-    if echo "$output" | grep -q "NOERROR" && [ -n "$ms" ]; then
-        inc pass
-        if [ -n "$EXPECTED_IP" ] && [ -n "$answer" ] && [ "$answer" != "$EXPECTED_IP" ]; then
-            inc tampered
-            printf "  ${Y}⚠ TAMPER${N}  %-33s %-20s ${Y}%4d ms${N}  ${C}(TCP)${N}  ${R}→ %s${N}\n" "$name" "$ip" "$ms" "$answer" | tee -a "$REPORT_FILE"
-            echo "TAMPER|TCP|$ms|$name|$ip|$answer" >> "$RANKING_FILE"
-        else
-            printf "  ${G}✓ OPEN${N}    %-33s %-20s ${Y}%4d ms${N}  ${C}(TCP)${N}\n" "$name" "$ip" "$ms" | tee -a "$REPORT_FILE"
-            echo "OK|TCP|$ms|$name|$ip" >> "$RANKING_FILE"
-        fi
-    else
-        inc fail
-        printf "  ${R}✗ BLOCKED${N} %-33s %s  ${C}(TCP)${N}\n" "$name" "$ip" | tee -a "$REPORT_FILE"
-    fi
+    _check_tamper _query_tcp "$ip"
+    _report_result "$name" "$ip" "TCP" "${C}(TCP)${N}"
 }
 
 test_dot() {
     local name="$1" ip="$2" hostname="${3:-$ip}"; inc total
-    local start end ms result
+
     if command -v kdig >/dev/null 2>&1; then
-        start=$(date +%s%N)
-        result=$(kdig +tls-ca +tls-hostname="$hostname" +timeout=$TIMEOUT +retry=0 @"$ip" "$TEST_DOMAIN" A 2>/dev/null)
-        end=$(date +%s%N); ms=$(( (end - start) / 1000000 ))
-        if echo "$result" | grep -q "NOERROR"; then
-            local dot_answer
-            dot_answer=$(echo "$result" | awk '/IN[[:space:]]+A[[:space:]]+/{print $NF}' | head -1)
-            inc pass
-            if [ -n "$EXPECTED_IP" ] && [ -n "$dot_answer" ] && [ "$dot_answer" != "$EXPECTED_IP" ]; then
-                inc tampered
-                printf "  ${Y}⚠ TAMPER${N}  %-33s %-20s ${Y}%4d ms${N}  ${M}(DoT)${N}  ${R}→ %s${N}\n" "$name" "$ip" "$ms" "$dot_answer" | tee -a "$REPORT_FILE"
-                echo "TAMPER|DoT|$ms|$name|$ip|$dot_answer" >> "$RANKING_FILE"
-            else
-                printf "  ${G}✓ OPEN${N}    %-33s %-20s ${Y}%4d ms${N}  ${M}(DoT)${N}\n" "$name" "$ip" "$ms" | tee -a "$REPORT_FILE"
-                echo "OK|DoT|$ms|$name|$ip" >> "$RANKING_FILE"
-            fi
-            return
-        fi
+        _check_tamper _query_dot "$ip" "$hostname"
+        _report_result "$name" "$ip" "DoT" "${M}(DoT)${N}"
+        return
     fi
+
+    # Fallback: TLS handshake check only (no tamper detection possible)
+    local start end ms result
     start=$(date +%s%N)
     result=$(timeout 2 bash -c "echo | openssl s_client -connect $ip:853 -servername $hostname 2>/dev/null" | grep -c "BEGIN CERTIFICATE")
     end=$(date +%s%N); ms=$(( (end - start) / 1000000 ))
@@ -146,27 +256,8 @@ test_dot() {
 
 test_doh() {
     local name="$1" hostname="$2" ip="$3" path="$4"; inc total
-    local start end ms result answer
-    start=$(date +%s%N)
-    answer=$(curl -s --max-time 2 --resolve "${hostname}:443:${ip}" \
-        -H "accept: application/dns-json" \
-        "https://${hostname}${path}?name=${TEST_DOMAIN}&type=A" 2>/dev/null | \
-        tr -d '\0' | grep -oP '"data"\s*:\s*"\K[0-9.]+' | head -1)
-    end=$(date +%s%N); ms=$(( (end - start) / 1000000 ))
-    if [ -n "$answer" ]; then
-        inc pass
-        if [ -n "$EXPECTED_IP" ] && [ "$answer" != "$EXPECTED_IP" ]; then
-            inc tampered
-            printf "  ${Y}⚠ TAMPER${N}  %-18s %-24s → %-15s ${Y}%4d ms${N}  ${R}→ %s${N}\n" "$name" "$hostname" "$ip" "$ms" "$answer" | tee -a "$REPORT_FILE"
-            echo "TAMPER|DoH|$ms|$name|$hostname>$ip|$answer" >> "$RANKING_FILE"
-        else
-            printf "  ${G}✓ OPEN${N}    %-18s %-24s → %-15s ${Y}%4d ms${N}\n" "$name" "$hostname" "$ip" "$ms" | tee -a "$REPORT_FILE"
-            echo "OK|DoH|$ms|$name|$hostname>$ip" >> "$RANKING_FILE"
-        fi
-    else
-        inc fail
-        printf "  ${R}✗ BLOCKED${N} %-18s %-24s → %s\n" "$name" "$hostname" "$ip" | tee -a "$REPORT_FILE"
-    fi
+    _check_tamper _query_doh "$hostname" "$ip" "$path"
+    _report_result_doh "$name" "$hostname" "$ip"
 }
 
 test_doq() {
